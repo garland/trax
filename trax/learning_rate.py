@@ -220,11 +220,18 @@ def PolicySchedule(
 
   # Build the policy network and load its parameters.
   start_time = time.time()
+  (low, high) = observation_range
+  observation_space = gym.spaces.Box(
+      shape=observations.shape[1:], low=low, high=high
+  )
+  action_space = gym.spaces.MultiDiscrete(
+      nvec=(len(action_multipliers),) * len(control_configs)
+  )
   net = ppo.policy_and_value_net(
-      n_controls=len(control_configs),
-      n_actions=len(action_multipliers),
-      vocab_size=policy_and_value_vocab_size,
       bottom_layers_fn=policy_and_value_model,
+      observation_space=observation_space,
+      action_space=action_space,
+      vocab_size=policy_and_value_vocab_size,
       two_towers=policy_and_value_two_towers,
   )
   logging.vlog(
@@ -245,17 +252,7 @@ def PolicySchedule(
   rng = jax_random.get_prng(seed=seed)
   start_time = time.time()
 
-  (low, high) = observation_range
-  observation_space = gym.spaces.Box(
-      shape=observations.shape[1:], low=low, high=high
-  )
-  action_space = gym.spaces.MultiDiscrete(
-      nvec=(len(action_multipliers),) * len(control_configs)
-  )
   n_timesteps = observations.shape[0]
-  rewards_to_actions = ppo.init_rewards_to_actions(
-      policy_and_value_vocab_size, observation_space, action_space, n_timesteps
-  )
   # (log_probs, value_preds, state, rng)
   (log_probs, _, _, _) = ppo.run_policy(
       policy_and_value_net_apply=net,
@@ -264,10 +261,7 @@ def PolicySchedule(
       weights=params,
       state=state,
       rng=rng,
-      vocab_size=policy_and_value_vocab_size,
-      observation_space=observation_space,
       action_space=action_space,
-      rewards_to_actions=rewards_to_actions,
   )
 
   logging.vlog(

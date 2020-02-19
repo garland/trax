@@ -22,7 +22,6 @@ from __future__ import print_function
 import functools
 import itertools
 
-import gin
 import gym
 import jax
 from jax import random as jax_random
@@ -32,7 +31,6 @@ from tensorflow.compat.v1.io import gfile
 from trax import layers
 from trax import models
 from trax.rl import ppo
-from trax.rl import serialization_utils
 from trax.shapes import ShapeDtype
 from trax.supervised import inputs
 from trax.supervised import trainer_lib
@@ -88,10 +86,10 @@ class PpoTest(test.TestCase):
     n_actions = 2
     n_controls = 3
     pnv_model = ppo.policy_and_value_net(
-        n_controls=n_controls,
-        n_actions=n_actions,
-        vocab_size=None,
         bottom_layers_fn=lambda: [layers.Flatten(n_axes_to_keep=2)],
+        observation_space=gym.spaces.Box(shape=observation_shape),
+        action_space=gym.spaces.MultiDiscrete((n_actions,) * n_controls),
+        vocab_size=None,
         two_towers=True,
     )
     input_signature = ShapeDtype(batch_observation_shape)
@@ -332,8 +330,8 @@ class PpoTest(test.TestCase):
          [[0.3, 0.1, 0.6], [0.1, 0.1, 0.8]]]
     )
 
-    # Shape (2, 2, 1)
-    actions = np.array([[1, 2], [0, 1]])
+    # Shape (2, 2, 1, 1)
+    actions = np.array([[[1], [2]], [[0], [1]]])
 
     chosen_probabs = ppo.chosen_probabs(probab_observations, actions)
 
@@ -351,7 +349,7 @@ class PpoTest(test.TestCase):
         [np.log(0.1), np.log(0.1), np.log(0.4), np.log(0.4)],
         [np.log(0.3), np.log(0.1), np.log(0.5), np.log(0.1)],
         [np.log(0.1), np.log(0.2), np.log(0.6), np.log(0.1)],
-    ]])
+    ]])[:, :, None, :]
 
     p_new = np.array([[
         [np.log(0.3), np.log(0.1), np.log(0.5), np.log(0.1)],
@@ -363,9 +361,9 @@ class PpoTest(test.TestCase):
         [np.log(0.1), np.log(0.1), np.log(0.2), np.log(0.6)],
         [np.log(0.3), np.log(0.1), np.log(0.3), np.log(0.3)],
         [np.log(0.1), np.log(0.2), np.log(0.1), np.log(0.6)],
-    ]])
+    ]])[:, :, None, :]
 
-    actions = np.array([[1, 2, 0, 1], [0, 3, 3, 0]])
+    actions = np.array([[1, 2, 0, 1], [0, 3, 3, 0]])[:, :, None]
 
     mask = np.array([[1, 1, 0, 0], [1, 1, 1, 0]])
 
@@ -443,16 +441,16 @@ class PpoTest(test.TestCase):
         ppo.clipped_objective(probab_ratios, advantages, mask, epsilon))
 
   def test_combined_loss(self):
-    B, T, A, OBS = 2, 10, 2, (28, 28, 3)  # pylint: disable=invalid-name
+    B, T, C, A, OBS = 2, 10, 1, 2, (28, 28, 3)  # pylint: disable=invalid-name
     batch_observation_shape = (1, 1) + OBS
 
     make_net = lambda: ppo.policy_and_value_net(  # pylint: disable=g-long-lambda
-        n_controls=1,
-        n_actions=A,
-        vocab_size=None,
         bottom_layers_fn=lambda: [layers.Flatten(n_axes_to_keep=2)],
+        observation_space=gym.spaces.Box(shape=OBS),
+        action_space=gym.spaces.Discrete(A),
+        vocab_size=None,
         two_towers=True,
-    )
+    )[0]
     net = make_net()
 
     input_signature = ShapeDtype(batch_observation_shape)
@@ -462,7 +460,7 @@ class PpoTest(test.TestCase):
     # Generate a batch of observations.
 
     observations = np.random.uniform(size=(B, T + 1) + OBS)
-    actions = np.random.randint(0, A, size=(B, T + 1))
+    actions = np.random.randint(0, A, size=(B, T + 1, C))
     rewards = np.random.uniform(0, 1, size=(B, T))
     mask = np.ones_like(rewards)
 
@@ -486,7 +484,6 @@ class PpoTest(test.TestCase):
         'entropy_weight': entropy_weight,
     }
 
-    rewards_to_actions = np.eye(value_predictions_old.shape[1])
     (value_loss_1, _) = ppo.value_loss_given_predictions(
         value_predictions_new, rewards, mask, gamma=gamma,
         value_prediction_old=value_predictions_old, epsilon=epsilon)
@@ -495,7 +492,6 @@ class PpoTest(test.TestCase):
         old_log_probabs,
         value_predictions_old,
         actions,
-        rewards_to_actions,
         rewards,
         mask,
         gamma=gamma,
@@ -509,7 +505,6 @@ class PpoTest(test.TestCase):
                           net,
                           observations,
                           actions,
-                          rewards_to_actions,
                           rewards,
                           mask,
                           nontrainable_params=nontrainable_params,
@@ -541,7 +536,7 @@ class PpoTest(test.TestCase):
         [np.log(0.3), np.log(0.1), np.log(0.5), np.log(0.1)],
         [np.log(0.1), np.log(0.2), np.log(0.6), np.log(0.1)],
         [np.log(0.3), np.log(0.1), np.log(0.5), np.log(0.1)],
-    ]])
+    ]])[:, :, None, :]
 
     # (2, 4)
     mask = np.array([
@@ -604,14 +599,14 @@ class PpoTest(test.TestCase):
     )
 
     make_policy = lambda: ppo.policy_and_value_net(  # pylint: disable=g-long-lambda
-        n_actions=3,
-        n_controls=2,
-        vocab_size=4,
         bottom_layers_fn=functools.partial(
             models.TransformerDecoder, **transformer_kwargs
         ),
+        observation_space=gym.spaces.Box(shape=(1,)),
+        action_space=gym.spaces.MultiDiscrete([3, 3]),
+        vocab_size=4,
         two_towers=False,
-    )
+    )[0]
     policy = make_policy()
     input_signature = ShapeDtype((1, 1), np.int32)
     policy._set_rng_recursive(rng)
@@ -650,60 +645,12 @@ class PpoTest(test.TestCase):
     stream2 = ppo.shuffled_index_batches(dataset_size, batch_size)
     self.assertFalse(np.array_equal(next(stream1), next(stream2)))
 
-  def test_inits_serialization(self):
-    serialization_kwargs = ppo.init_serialization(
-        vocab_size=4,
-        observation_space=gym.spaces.Box(shape=(2, 3), low=0, high=1),
-        action_space=gym.spaces.Discrete(n=3),
-        n_timesteps=6,
-    )
-    # Check that we can call a function from serialization_utils with those
-    # kwargs.
-    serialization_utils.observation_mask(**serialization_kwargs)
-
-  # TODO(pkozakowski): Check the contents.
-  def test_inits_rewards_to_actions_non_serialized(self):
-    n_timesteps = 6
-    n_controls = 2
-    rewards_to_actions = ppo.init_rewards_to_actions(
-        vocab_size=None,
-        observation_space=gym.spaces.Box(shape=(2, 3), low=0, high=1),
-        action_space=gym.spaces.MultiDiscrete(nvec=((2,) * n_controls)),
-        n_timesteps=n_timesteps,
-    )
-    n_action_symbols = n_timesteps * n_controls
-    self.assertEqual(rewards_to_actions.shape, (n_timesteps, n_action_symbols))
-
-  # TODO(pkozakowski): Check the contents.
-  def test_inits_rewards_to_actions_serialized(self):
-    precision = 2
-    gin.bind_parameter('BoxSpaceSerializer.precision', precision)
-    obs_size = 3
-    n_timesteps = 6
-    n_controls = 2
-    rewards_to_actions = ppo.init_rewards_to_actions(
-        vocab_size=4,
-        observation_space=gym.spaces.Box(shape=(obs_size,), low=0, high=1),
-        action_space=gym.spaces.MultiDiscrete(nvec=((2,) * n_controls)),
-        n_timesteps=n_timesteps,
-    )
-    n_action_symbols = n_timesteps * (obs_size * precision + n_controls)
-    self.assertEqual(rewards_to_actions.shape, (n_timesteps, n_action_symbols))
-
-  def _make_run_policy_kwargs(
-      self, observation_space, action_space, n_timesteps, vocab_size
-  ):
-    rewards_to_actions = ppo.init_rewards_to_actions(
-        vocab_size, observation_space, action_space, n_timesteps
-    )
+  def _make_run_policy_kwargs(self, action_space):
     return {
         'weights': None,
         'state': None,
         'rng': self.rng_key,
-        'vocab_size': vocab_size,
-        'observation_space': observation_space,
         'action_space': action_space,
-        'rewards_to_actions': rewards_to_actions,
     }
 
   def _make_log_prob_and_value_seqs(
@@ -716,75 +663,6 @@ class PpoTest(test.TestCase):
       for (i, start_index) in enumerate(start_indices):
         x_seq[i, start_index:(start_index + n_controls)] = x[i]
     return (log_prob_seq, value_seq)
-
-  def test_runs_policy_non_serialized(self):
-    n_timesteps = 5
-    n_controls = 3
-    n_actions = 2
-    obs_shape = (2, 3)
-    lengths = np.array([2, 3])
-    input_observations = np.random.uniform(
-        0, 1, size=((2, n_timesteps) + obs_shape)
-    )
-    expected_log_probs = np.random.uniform(
-        0, 1, size=(2, n_controls, n_actions)
-    )
-    expected_values = np.random.uniform(0, 1, size=(2, n_controls))
-    def mock_apply(observations, *unused_args, **unused_kwargs):
-      np.testing.assert_array_equal(observations, input_observations)
-      start_indices = (lengths - 1) * n_controls
-      return self._make_log_prob_and_value_seqs(
-          expected_log_probs, expected_values, start_indices, n_timesteps
-      )
-    observation_space = gym.spaces.Box(shape=obs_shape, low=0, high=1)
-    action_space = gym.spaces.MultiDiscrete(nvec=((n_actions,) * n_controls))
-    (log_probs, values, _, _) = ppo.run_policy(
-        mock_apply,
-        observations=input_observations,
-        lengths=lengths,
-        **self._make_run_policy_kwargs(
-            observation_space, action_space, n_timesteps, vocab_size=None
-        )
-    )
-    np.testing.assert_array_equal(log_probs, expected_log_probs)
-    np.testing.assert_array_equal(values, expected_values)
-
-  def test_runs_policy_serialized(self):
-    precision = 2
-    gin.bind_parameter('BoxSpaceSerializer.precision', precision)
-    n_timesteps = 5
-    n_controls = 3
-    n_actions = 2
-    obs_length = 4
-    obs_shape = (obs_length,)
-    lengths = np.array([2, 3])
-    input_observations = np.random.uniform(
-        0, 1, size=((2, n_timesteps) + obs_shape)
-    )
-    expected_log_probs = np.random.uniform(
-        0, 1, size=(2, n_controls, n_actions)
-    )
-    expected_values = np.random.uniform(0, 1, size=(2, n_controls))
-    def mock_apply(observations, *unused_args, **unused_kwargs):
-      step_repr_length = obs_length * precision + n_controls
-      n_symbols = n_timesteps * step_repr_length
-      self.assertEqual(observations.shape, (2, n_symbols))
-      start_indices = (lengths - 1) * step_repr_length + obs_length * precision
-      return self._make_log_prob_and_value_seqs(
-          expected_log_probs, expected_values, start_indices, n_symbols
-      )
-    observation_space = gym.spaces.Box(shape=obs_shape, low=0, high=1)
-    action_space = gym.spaces.MultiDiscrete(nvec=((n_actions,) * n_controls))
-    (log_probs, values, _, _) = ppo.run_policy(
-        mock_apply,
-        observations=input_observations,
-        lengths=lengths,
-        **self._make_run_policy_kwargs(
-            observation_space, action_space, n_timesteps, vocab_size=6
-        )
-    )
-    np.testing.assert_array_equal(log_probs, expected_log_probs)
-    np.testing.assert_array_equal(values, expected_values)
 
 
 if __name__ == '__main__':
